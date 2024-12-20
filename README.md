@@ -1,4 +1,4 @@
-# ceol #
+# changeur-coordonnees #
 
 This project contains several python scripts and sets of data for changing coordonates between GNSS referential and Laser Tracker referential.
 
