@@ -10,7 +10,8 @@ qui correspond le mieux. Et d'estimer l'incertitude liée à cette fonction de c
     pour une nouvelle coordonnée dans un repère, en calculant les coordonnées dans l'autre repère, quelle serait l'incertitude
     sur ces nouvelles coordonnées
 
-Vigilance : 
+Vigilance : Translation dans le repère GNSS, puis rotation selon Euler modifié : Z, X, Y
+            Attention mémoire : nombre de points * nombre de scénarios montécarlo < 100 millions
 
 
 Notes de version : première version. Calcul changement de coordonnées + calcul d'incertitude sur chaque coordonnée
@@ -20,6 +21,9 @@ Notes de version : première version. Calcul changement de coordonnées + calcul
                     Correction des fonctions TransRotInv et TransRotInv2 (erreur dans le signe des angles)
                     Ajout du transfert du DateTime donné par Tracker dans le cas de transfert vers GNSS
                         (utilisation pour comparer la loc robot avec la loc tracker)
+                    travail sur le transfert d'incertitudes (essai d'optimisation de calcul)
+                        -> pour la partie Tracker->GNSS, fait !
+                        -> reste à faire la partie GNSS->Tracker
 """
 
 #%% # Imports et paramètres de l'algorithme
@@ -32,9 +36,10 @@ from datetime import datetime
 import random
 
 methode = "SLSQP" # "Powell" semble OK, "L-BFGS-B" part en live avec certains scénarii, "SLSQP" semble OK sur 10 scénarii, 4* + rapide que Powell
-Nombre_It = 100 # nombre d'itération pour la méthode Montécarlo (calcul d'incertitude par bruit gaussien sur les variables)
+Nombre_It = 10000 # nombre d'itération pour la méthode Montécarlo (calcul d'incertitude par bruit gaussien sur les variables)
 Erreur_GPS = 0.01 # erreur de mesure GPS par défaut [mètre]
-nombre_rep = 1 # nbre de répétition de mesure effectuée dans le repère R1 (= canne d'arpentage GNSS lambert étendu CC46)
+Precision_Tracker_Par_Defaut = 0.0002 # EN METRE ! Incertitude à 80m de portée. Par défaut si absente dans le fichier
+nombre_rep = 1 # nbre de répétition de mesure effectuée dans le repère R1 (= canne d'arpentage GNSS lambert étendu CC46 ESPG:9846)
 
 GNSS_to_Tracker = False # transfert des coord de GNSS vers Tracker
 Tracker_to_GNSS = True # transfert des coord de Tracker vers GNSS
@@ -42,25 +47,20 @@ Tracker_to_GNSS = True # transfert des coord de Tracker vers GNSS
 Tracker_Pilot = True # export de la trajectoire avec Tracker Pilot
 Spatial_Analyser = False # export de la trajectoire avec Spatial Analyser
 
-Incertitude = False # true pour calculer l'incertitude, false pour un transfert simple
+Incertitude = True # true pour calculer l'incertitude, false pour un transfert simple
 
 Affichage = False # True pour créer un graphique de la trajectoire
 
 Fichier_R1 = "" # fichier contenant les coordonnées des points dans le repère 1 / "GNSS"
 
-Liste_Fichiers_R2 = ["C:/Users/cmoignard/Documents/Travail cmoignard/Projets/Protocoles/ARPA PC2/Mesures/20241126_arpa_pc2_hall_fourrage_tscf/Trajectoires/traj fille 1.csv", 
-                     "C:/Users/cmoignard/Documents/Travail cmoignard/Projets/Protocoles/ARPA PC2/Mesures/20241126_arpa_pc2_hall_fourrage_tscf/Trajectoires/traj fille 2.csv", 
-                     "C:/Users/cmoignard/Documents/Travail cmoignard/Projets/Protocoles/ARPA PC2/Mesures/20241126_arpa_pc2_hall_fourrage_tscf/Trajectoires/traj fille 3.csv", 
-                     "C:/Users/cmoignard/Documents/Travail cmoignard/Projets/Protocoles/ARPA PC2/Mesures/20241126_arpa_pc2_hall_fourrage_tscf/Trajectoires/traj fille 4.csv", 
-                     "C:/Users/cmoignard/Documents/Travail cmoignard/Projets/Protocoles/ARPA PC2/Mesures/20241126_arpa_pc2_hall_fourrage_tscf/Trajectoires/traj fille 5.csv", 
-                     "C:/Users/cmoignard/Documents/Travail cmoignard/Projets/Protocoles/ARPA PC2/Mesures/20241126_arpa_pc2_hall_fourrage_tscf/Trajectoires/traj fille 6.csv", 
-                     "C:/Users/cmoignard/Documents/Travail cmoignard/Projets/Protocoles/ARPA PC2/Mesures/20241126_arpa_pc2_hall_fourrage_tscf/Trajectoires/traj fille 7.csv", 
-                     "C:/Users/cmoignard/Documents/Travail cmoignard/Projets/Protocoles/ARPA PC2/Mesures/20241126_arpa_pc2_hall_fourrage_tscf/Trajectoires/traj mere a la main.csv", 
+Liste_Fichiers_R2 = [
+                     "../Data Sets/Tracker/traj fille 1 extrait.csv", 
+#                     "",
                      ]
 
-# Fichier_R2 = "C:/Users/cmoignard/Documents/Travail cmoignard/Projets/Protocoles/ARPA PC1/OMESRO/Changement coordonnées pour illustration/suivi traj_20231220_tracker/m14_20231220_1629.csv" # fichier contenant les coordonnées dans le repère 2 / "Tracker"
 Fichier_changeur = "C:/Users/cmoignard/Documents/Travail cmoignard/Projets/Protocoles/ARPA PC2/Mesures/20241126_arpa_pc2_hall_fourrage_tscf/TR_ZXY_GNSSS_Tracker_SLSQP_10000mc_[]sup_2024-12-04T10-32-16.csv" # fichier contenant les paramètres du changeur de coordonnées
-unite = {"X":"X [m]", "Y":"Y [m]", "Z":"Z [m]", "sigma":"sigma [m]", "sigmaX":"sigmaX [m]", "sigmaY":"sigmaY [m]", "sigmaZ":"sigmaZ [m]", }
+
+unite = {"X":"X [m]", "Y":"Y [m]", "Z":"Z [m]", "sigma":"Sigma [m]", "sigmaX":"SigmaX [m]", "sigmaY":"SigmaY [m]", "sigmaZ":"SigmaZ [m]", }
 
 start = time.time()
 
@@ -227,6 +227,7 @@ def TransRotInc (liste_points_rep1, parametres, param_mc) :
     for index in liste_points_rep1.index : # choix d'un point / parcous tous les points 1 par 1
         # point_rep2 = liste_points_rep1[0:0]
         point_rep1 = liste_points_rep1[0:0]
+        print("Point actuellement traité : ", index)
         # sigma_1 = liste_points_rep1.loc[index, ["sigmaX", "sigmaY", "sigmaZ"]].max()
         s2 = pd.Series()
         # sigma_1 = liste_points_rep1[["sigma"]].max()
@@ -395,7 +396,7 @@ def TransRotInv2 (liste_points_rep2) :
     y_4 = y_3 - deltaY
     z_4 = z_3 - deltaZ
      
-    return pd.concat([x_4, y_4, z_4], axis=1)
+    return pd.concat([x_4, y_4, z_4, liste_points_rep2[["Numéro de point"]]], axis=1)
 
 #%% # définir la fonction de changement de repère vers R2 // DataFrame AVEC INCERTITUDE
 # ATTENTION : formulation non canonique : la translation est effectuée avant la rotation. Donc, les paramètres de translation
@@ -433,12 +434,35 @@ def TransRotInvInc (liste_points_rep2, parametres, param_mc) :
     
     """
     
-    # initialisation des variables de stockage
-    liste_points_rep1 = liste_points_rep2[0:0]
-        
-    for index in liste_points_rep2.index : # choix d'un point / parcous tous les points 1 par 1
+    # duplication des lignes du DataFrame en fonction du nombre de scénarios
+    liste_R2 = liste_points_rep2
+    liste_R2["Numéro de point"] = liste_points_rep2.index
+    liste_R2 = pd.DataFrame(np.repeat(liste_R2[["Numéro de point", "X [m]", "Y [m]", "Z [m]", "sigmaX", "sigmaY", "sigmaZ"]].values, param_mc, axis=0), columns = liste_R2[["Numéro de point", "X [m]", "Y [m]", "Z [m]", "sigmaX", "sigmaY", "sigmaZ"]].columns)
+    
+    # Génération du tableau aléatoire 3 colonnes selon les coordonnées et 6 colonnes selon le changeur de coord
+    df2 = pd.DataFrame()
+    df2["Numéro de point"] = liste_R2["Numéro de point"]
+    df2["X [m]"] = np.random.normal(loc=liste_R2["X [m]"], scale=liste_R2["sigmaX"], size=None)
+    df2["Y [m]"] = np.random.normal(loc=liste_R2["Y [m]"], scale=liste_R2["sigmaX"], size=None)
+    df2["Z [m]"] = np.random.normal(loc=liste_R2["Z [m]"], scale=liste_R2["sigmaX"], size=None)
+    df2["DeltaX [m]"] = np.random.normal(loc=parametres.at["Valeurs", "DeltaX [m]"], scale=parametres.at["Sigma", "DeltaX [m]"], size=df2.index.size)
+    df2["DeltaY [m]"] = np.random.normal(loc=parametres.at["Valeurs", "DeltaY [m]"], scale=parametres.at["Sigma", "DeltaY [m]"], size=df2.index.size)
+    df2["DeltaZ [m]"] = np.random.normal(loc=parametres.at["Valeurs", "DeltaZ [m]"], scale=parametres.at["Sigma", "DeltaZ [m]"], size=df2.index.size)
+    df2["Alpha(Z) [rad]"] = np.random.normal(loc=parametres.at["Valeurs", "Alpha(Z) [rad]"], scale=parametres.at["Sigma", "Alpha(Z) [rad]"], size=df2.index.size)
+    df2["Beta(X) [rad]"] = np.random.normal(loc=parametres.at["Valeurs", "Beta(X) [rad]"], scale=parametres.at["Sigma", "Beta(X) [rad]"], size=df2.index.size)
+    df2["Gamma(Y) [rad]"] = np.random.normal(loc=parametres.at["Valeurs", "Gamma(Y) [rad]"], scale=parametres.at["Sigma", "Gamma(Y) [rad]"], size=df2.index.size)
+    
+    df1 = TransRotInv2(df2)
+    df1 = df1.astype({'Numéro de point': 'int32'})
+    liste_points_rep1 = df1[["Numéro de point", "X [m]", "Y [m]", "Z [m]"]].groupby(['Numéro de point']).std()
+    liste_points_rep1 = liste_points_rep1.rename(columns={"X [m]": "SigmaX [m]", "Y [m]": "SigmaY [m]", "Z [m]": "SigmaZ [m]"})
+    liste_points_rep1[["X [m]", "Y [m]", "Z [m]"]] = df1[["Numéro de point", "X [m]", "Y [m]", "Z [m]"]].groupby(['Numéro de point']).mean()
+    
+    """
+    for index in liste_points_rep2.index : # choix d'un point / parcours tous les points 1 par 1
         # point_rep2 = liste_points_rep1[0:0]
         point_rep2 = liste_points_rep2[0:0]
+        print("Point actuellement traité : ", index)
         # sigma_1 = liste_points_rep1.loc[index, ["sigmaX", "sigmaY", "sigmaZ"]].max()
         s2 = pd.Series()
         # sigma_1 = liste_points_rep1[["sigma"]].max()
@@ -466,8 +490,9 @@ def TransRotInvInc (liste_points_rep2, parametres, param_mc) :
         std = point_rep1[["X [m]", "Y [m]", "Z [m]"]].std(axis=0).rename({"X [m]": "sigmaX", "Y [m]": "sigmaY", "Z [m]": "sigmaZ"})
         new_line = pd.concat([moy, std]).rename(index)
         liste_points_rep1 = pd.concat([liste_points_rep1, new_line.to_frame().T], ignore_index=False)
+    """
     
-    liste_points_rep1["sigma"] = liste_points_rep1[["sigmaX", "sigmaY", "sigmaZ"]].max(axis=1)
+    liste_points_rep1["Sigma [m]"] = liste_points_rep1[["SigmaX [m]", "SigmaY [m]", "SigmaZ [m]"]].max(axis=1)
     
     return liste_points_rep1
 
@@ -507,23 +532,27 @@ if GNSS_to_Tracker == True :
     print("   Nombre de MontéCarlo : ", Nombre_It)
     liste_points_R2 = TransRot(liste_points_R1, Solution) # transfert sans incertitude
     
-    # liste_points_R1_inv = TransRotInv(liste_points_R2, Solution) # transfert retour
+    # Calcul principal
     liste_points_R2_inc = TransRotInc(liste_points_R1, Solution, Nombre_It) # transfert avec incertitudes
+    
+    # Ajout du DateTime [s]
+    liste_points_R2_inc["DateTime [s]"] = liste_points_R1["DateTime [s]"]
+    
     # enregistrement du fichier
-    nom_de_fichier = Fichier_R1.replace(".txt", "_") + "vers_Tracker_" + datetime.now().isoformat(timespec='seconds').replace(":", "-") + ".csv"
+    nom_de_fichier = Fichier_R1.replace(".csv", "_").replace(".txt", "_").replace("GNSS", "Tracker") + "vers_Tracker_" + datetime.now().isoformat(timespec='seconds').replace(":", "-") + ".csv"
     liste_points_R2_inc = liste_points_R2_inc.rename(columns=unite)
-    liste_points_R2_inc.to_csv(nom_de_fichier, sep=";", decimal=",", index=True)
+    liste_points_R2_inc[["DateTime [s]", "X [m]", "Y [m]", "Z [m]", "SigmaX [m]", "SigmaY [m]", "SigmaZ [m]"]].to_csv(nom_de_fichier, sep=";", decimal=",", index=True)
     # affichage des graphiques
-    plotINC_X = liste_points_R2_inc.plot.scatter(x="X [m]", y="Y [m]", c='sigmaX [m]', colormap='viridis', title="Incertitude sur X", sharex=False)
-    plotINC_Y = liste_points_R2_inc.plot.scatter(x="X [m]", y="Y [m]", c='sigmaY [m]', colormap='viridis', title="Incertitude sur Y", sharex=False)
-    plotINC_Z = liste_points_R2_inc.plot.scatter(x="X [m]", y="Y [m]", c='sigmaZ [m]', colormap='viridis', title="Incertitude sur Z", sharex=False)
-    DIFF = liste_points_R2_inc[["sigmaX [m]", "sigmaY [m]", "sigmaZ [m]"]] - liste_points_R1[["sigmaX", "sigmaY", "sigmaZ"]].rename(columns=unite)
+    plotINC_X = liste_points_R2_inc.plot.scatter(x="X [m]", y="Y [m]", c='SigmaX [m]', colormap='viridis', title="Incertitude sur X", sharex=False)
+    plotINC_Y = liste_points_R2_inc.plot.scatter(x="X [m]", y="Y [m]", c='SigmaY [m]', colormap='viridis', title="Incertitude sur Y", sharex=False)
+    plotINC_Z = liste_points_R2_inc.plot.scatter(x="X [m]", y="Y [m]", c='SigmaZ [m]', colormap='viridis', title="Incertitude sur Z", sharex=False)
+    DIFF = liste_points_R2_inc[["SigmaX [m]", "SigmaY [m]", "SigmaZ [m]"]] - liste_points_R1[["SigmaX", "SigmaY", "SigmaZ"]].rename(columns=unite)
     plotSIGMA = DIFF.plot.bar(title="Ajout d'incertitude par le transfert de coordonnées de GNSS vers Tracker")
     
     end = time.time()
     elapsed = int((end - start))
     print("\n  RESULTATS \n[X Y Z sigmaX sigmaY sigmaZ] exprimés en mètre et dans le repère 2")
-    print(liste_points_R2_inc[["X [m]", "Y [m]", "Z [m]", "sigmaX [m]", "sigmaY [m]", "sigmaZ [m]"]])
+    print(liste_points_R2_inc[["X [m]", "Y [m]", "Z [m]", "SigmaX [m]", "SigmaY [m]", "SigmaZ [m]"]])
     print(f"\nTemps d'exécution : {elapsed} s\n")
 
 #%% # changement de coordonées de R2 vers R1 avec calcul d'incertitude par méthode de MontéCarlo
@@ -543,11 +572,13 @@ if Tracker_to_GNSS == True :
             liste_points_R2["DateTime [s]"] = pd.to_datetime("20.12.2023 16:23:00.000", dayfirst = True) # fausse heure ! A remplacer
         elif Tracker_Pilot == True :
             liste_points_R2 = pd.read_csv(Fichier_R2, sep=";", decimal=",", encoding="cp1252", 
-                                          skiprows=[0], header=None, skipinitialspace=1, usecols=[1, 2, 3, 5, 6, 7, 12])  # fichier direct Tracker Pilot en mm "repère tracker"
-            liste_points_R2 = liste_points_R2.rename(columns={1: "X [m]", 2: "Y [m]", 3: "Z [m]", 5: "U95x", 6: "U95y", 7: "U95z", 12: "DateTime [s]"})
+                                          skiprows=[0], header=None, skipinitialspace=1, usecols=[1, 2, 3, 4, 5, 6, 7, 12])  # fichier direct Tracker Pilot en mm "repère tracker"
+            liste_points_R2 = liste_points_R2.rename(columns={1: "X [m]", 2: "Y [m]", 3: "Z [m]", 4: "U95", 5: "U95x", 6: "U95y", 7: "U95z", 12: "DateTime [s]"})
             liste_points_R2["DateTime [s]"] = pd.to_datetime(liste_points_R2["DateTime [s]"], dayfirst = True)
         # filtrage et correction des valeurs
-        liste_points_R2[["X [m]", "Y [m]", "Z [m]", "U95x", "U95y", "U95z"]] = liste_points_R2[["X [m]", "Y [m]", "Z [m]", "U95x", "U95y", "U95z"]].div(1000.)
+        liste_points_R2[["X [m]", "Y [m]", "Z [m]", "U95", "U95x", "U95y", "U95z"]] = liste_points_R2[["X [m]", "Y [m]", "Z [m]", "U95", "U95x", "U95y", "U95z"]].div(1000.)
+        if liste_points_R2[["U95", "U95x", "U95y", "U95z"]].all(axis=None) == False :
+            liste_points_R2[["U95", "U95x", "U95y", "U95z"]] = Precision_Tracker_Par_Defaut
         
         liste_points_R2["sigmaX"] = liste_points_R2["U95x"] / 2.
         liste_points_R2["sigmaY"] = liste_points_R2["U95y"] / 2.
@@ -567,20 +598,20 @@ if Tracker_to_GNSS == True :
         liste_points_R1_inc["DateTime [s]"] = liste_points_R2["DateTime [s]"]
         
         # enregistrement fichier de points
-        nom_de_fichier = Fichier_R2.replace(".csv", "_").replace(".txt", "_") + "vers_GNSS_" + datetime.now(
+        nom_de_fichier = Fichier_R2.replace(".csv", "_").replace(".txt", "_").replace("Tracker", "GNSS") + "vers_GNSS_" + datetime.now(
                                     ).isoformat(timespec='seconds').replace(":", "-") + ".csv"
         liste_points_R1_inc = liste_points_R1_inc.rename(columns=unite)
-        liste_points_R1_inc.to_csv(nom_de_fichier, sep=";", decimal=",", index=True)
+        liste_points_R1_inc[["DateTime [s]", "X [m]", "Y [m]", "Z [m]", "SigmaX [m]", "SigmaY [m]", "SigmaZ [m]"]].to_csv(nom_de_fichier, sep=";", decimal=",", index=True)
         # affichage des graphiques
         if Affichage == True :
-            plotINC_Z = liste_points_R1_inc.plot.scatter(x="X [m]", y="Y [m]", c='sigmaZ [m]', colormap='viridis', title="Incertitude sur Z", sharex=False)
+            plotINC_Z = liste_points_R1_inc.plot.scatter(x="X [m]", y="Y [m]", c='SigmaZ [m]', colormap='viridis', title="Incertitude sur Z", sharex=False)
     
     # end of for Liste_Fichiers_R2
     end = time.time()
     elapsed = int((end - start))
     print(
-        "\n  RESULTATS du dernier fichier \n[X Y Z sigmaX sigmaY sigmaZ] exprimés en mètre et dans le repère 2")
-    print(liste_points_R1_inc[["X [m]", "Y [m]", "Z [m]", "sigmaX [m]", "sigmaY [m]", "sigmaZ [m]"]])
+        "\n  RESULTATS du dernier fichier \n[X Y Z SigmaX SigmaY SigmaZ] exprimés en mètre et dans le repère 2")
+    print(liste_points_R1_inc[["X [m]", "Y [m]", "Z [m]", "SigmaX [m]", "SigmaY [m]", "SigmaZ [m]"]])
     print(f"\nTemps d'exécution : {elapsed} s\n")
 
 #%% # analyse "incertitude changeur coord" vs "nbre itération MontéCarlo"
